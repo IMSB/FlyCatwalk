@@ -1,0 +1,342 @@
+function sexCombs=findSexCombs(dataDir,debug,knownSex)
+
+if nargin==0
+    clear, close all
+    clc
+    debug.plot=2;
+    [ret, name] = system('hostname');
+    if strcmp(strtrim(name),'wingX-PC')
+        dataMainDir='C:\Users\wingX\Documents\WingXSVN\labview\data\keep\28129_40L1';
+    else
+        dataMainDir='C:\Users\vasco\Documents\SVN\fly\scitracks\Trackit studies\OCV im proc\for sibylle\';
+    end
+    
+    dataMainDirContent=listDirectories(dataMainDir);
+    testedIndividuals=1:length(dataMainDirContent);
+    for p=1:length(testedIndividuals)
+        toSort(p)=str2num(expDirContent{p}(find(expDirContent{p}=='_',1,'last')+1:end));
+        knownSex{p}='X';
+    end
+    [~,ixSorted]=sort(toSort);
+    standAlone=true;
+elseif nargin<2
+    testedIndividuals=1;
+    debug.plot=0;
+    knownSex={'X'};
+    standAlone=false;
+elseif nargin<3
+    testedIndividuals=1;
+    standAlone=false;
+    knownSex={'X'};
+else
+    testedIndividuals=1;
+    ixSorted=1;
+    standAlone=false;
+    knownSex={'X'};
+end
+
+% create structuring elements
+strelOpen1=strel('disk',20,8);
+strelOpen2=strel('disk',1,8);
+strelClose1Size=5;
+strelClose1=strel('disk',strelClose1Size,8);
+strelDilate1=strel('disk',40,8);
+strelDilate2=strel('disk',3,8);
+
+for p2=1:length(testedIndividuals)
+    r=1;
+    if standAlone
+        dataDir=fullfile(dataMainDir,dataMainDirContent{ixSorted(testedIndividuals(p2))});
+        fprintf('Analysing %s\n',dataDir);
+        %         meas=testedIndividuals(ix(testedIndividuals(p2)));
+        %         dataMainDirContent=dir(dataMainDir);
+        %         dataMainDirContent(~[dataMainDirContent.isdir])=[];
+        %         dataDir=fullfile(dataMainDir,dataMainDirContent(meas).name);
+    end
+    BGName=dir(fullfile(dataDir,'background*.bmp'));
+    IBG=imread(fullfile(dataDir,BGName.name));
+    posFile=dir(fullfile(dataDir,'PositionData.txt'));
+    posData=importdata(fullfile(dataDir,posFile.name));
+    xPos=posData(:,2);
+    yPos=posData(:,3);
+    % end
+    pixelDistance=diff(xPos)+diff(yPos);
+    selectedImages=[1;find(abs(pixelDistance>10))+1];
+    % check for unusable images
+    try
+        [~,messages]=importOpencvAnalysisFile(fullfile(dataDir,'OpenCVAnalysisResult.txt'));
+        toDelete=false(length(selectedImages),1);
+        for p=1:length(selectedImages)
+            if strcmp(messages(selectedImages(p)),'DISCARDED Fly wings are touching the image borders')...
+                    || strcmp(messages(selectedImages(p)),'DISCARDED Fly was walking backwards (maybe it''ll be used in the future, but for now it''s ignored)')
+                toDelete(p)=true;
+            end
+        end
+        selectedImages(toDelete)=[];
+    catch
+        disp('OpenCVAnalysisResult.txt not found');
+    end
+    %dataDir=fullfile(dataDir,'images');
+    imageNames = dir(fullfile(dataDir,'temp*.bmp'));
+    
+    if debug.plot>1
+        figure
+    end
+    
+    IBGF=medfilt2(IBG(:,:,3),[10 10]);
+    for p=1:length(selectedImages)
+        sel=(selectedImages(p));
+        I=imread(fullfile(dataDir,imageNames(sel).name));
+        
+        IBGC=IBGF(yPos(sel)+1:yPos(sel)+size(I,1),xPos(sel)+1:xPos(sel)+size(I,2));
+        IRed=I(:,:,1);
+        IBlue=I(:,:,3);
+        ISub=IBGC-IBlue;
+        %         IMask=IBlue<(graythresh(IBlue)*1.2*255);
+        IMask=ISub>(graythresh(IBGC)*0.2*255);
+        IO=imopen(IMask,strelOpen1);
+        stats=regionprops(IO,'orientation','area','PixelIdxList','perimeter','centroid');
+        [~,ix]=max([stats.Area]);
+        
+        centroids=stats(ix).Centroid;
+        orientation=-stats(ix).Orientation;
+        IBiggest=false(size(IO));
+        IBiggest(stats(ix).PixelIdxList)=1;
+        if debug.plot>1
+            subplot(331)
+            imshow(I);
+            subplot(332)
+            imshow(IBlue);
+            subplot(333)
+            imshow(ISub);
+            subplot(334)
+            imshow(IMask);
+            subplot(335)
+            imshow(IO);
+            subplot(336)
+            imshow(IBiggest);
+            hold on
+        end
+        B = bwboundaries(IBiggest,'noholes');
+        if length(B)>1
+            maxlength=0;
+            for q=1:length(B)
+                lc=length(B{q});
+                if lc>maxlength
+                    ix2=q;
+                    maxlength=lc;
+                end
+            end
+            B=B{ix2};
+        else
+            B=B{1};
+        end
+        if debug.plot>1
+            plot(centroids(1),centroids(2),'g*')
+            plot(B(:,2),B(:,1),'y')
+        end
+        contourAngle=atan2(B(:,1)-centroids(2),B(:,2)-centroids(1))*180/pi;
+        [~,contourIx]=min(abs(contourAngle-orientation));
+        if debug.plot>1
+            plot(B(contourIx,2),B(contourIx,1),'r*')
+        end
+        %define a mask based on head position
+        ILegsMask=false(size(IBiggest));
+        
+        [XX,YY]=meshgrid(1:size(ILegsMask,2),1:size(ILegsMask,1));
+        %function y=ax+b; a=tan(orientation-90); b=y0-ax0;
+        pixelDistance=0;
+        p0=[B(contourIx,2)-cos(orientation*pi/180)*pixelDistance;B(contourIx,1)-sin(orientation*pi/180)*pixelDistance];
+        if debug.plot>1
+            plot(p0(1),p0(2),'b*')
+        end
+        if orientation==0
+            ILegsMask(YY>=p0(2))=1;
+        else
+            a=tan(orientation*pi/180-pi/2);
+            b=p0(2)-p0(1)*a;
+            x=1:size(ILegsMask,2);
+            y=a*x+b;
+            if debug.plot>1
+                plot(x,y,'m')
+            end
+            if orientation<0
+                ILegsMask(YY<=a*XX+b)=1;
+            else
+                ILegsMask(YY>=a*XX+b)=1;
+            end
+        end
+        
+        [~, ix3]=max(ILegsMask');
+        ix3=min(ix3);
+        ILegsMaskC=ILegsMask(:,ix3:end);
+        IRedC=IRed(:,ix3:end);
+        %     IBlueC=IBlue(:,ix3:end);
+        IBlueC=255-ISub(:,ix3:end);
+        IMaskC=IMask(:,ix3:end);
+        IBiggestC=IBiggest(:,ix3:end);
+        
+        ILegsMaskC(imdilate(IBiggestC,strelDilate1)~=0)=0;
+        if debug.plot>1
+            subplot(337)
+            imshow(ILegsMask)
+        end
+        IMasked=IMaskC;
+        IMasked(~ILegsMaskC)=0;
+        if debug.plot>1
+            subplot(338)
+            imshow(IMasked)
+        end
+        
+        stats2=regionprops(IMasked,'Area','PixelIdxList');
+        toDelete=[stats2.Area]<1000;
+        for q=1:length(toDelete)
+            if toDelete(q)==true
+                IMasked(stats2(q).PixelIdxList)=0;
+            end
+        end
+        %     IMasked=imopen(IMasked,strel('disk',1,8));
+        IMasked=imdilate(IMasked,strelDilate2);
+        stats3=regionprops(IMasked,'BoundingBox');
+        for q=1:length(stats3)
+            eccentricity=nan;
+            area=nan;
+            ILegR=imcrop(IRedC,stats3(q).BoundingBox);
+            ILegB=imcrop(IBlueC,stats3(q).BoundingBox);
+            ICombi=imadjust(ILegR)/2+ILegB/2;
+            IBrightest=max(ILegR,ILegB);
+            IMaskC=imcrop(IMasked,stats3(q).BoundingBox);
+            %             se = strel('disk',30);
+            %             ICombi2=imtophat(ICombi,se);
+            %             subplot(211)
+            %             imshow(ICombi);
+            %             subplot(212)
+            %             imshow(ICombi2);
+            %             ICombi=medfilt2(ICombi,[2 2],'symmetric');
+            %             ICombi=adapthisteq(ICombi,'numTiles',[4 4],'ClipLimit',0.001);
+            cThres=0.4*median(double(ICombi(~IMaskC)));
+            %             findAntennae(ILegB);
+            IMaskedC=ICombi;
+            IMaskedC(~IMaskC)=255;
+            det.Idet0=IMaskedC<cThres;
+            if find(det.Idet0)
+                det.IdetExt=false(size(det.Idet0,1)+strelClose1Size*2,size(det.Idet0,2)+strelClose1Size*2);
+                det.IdetExt(1+strelClose1Size:end-strelClose1Size,1+strelClose1Size:end-strelClose1Size)=det.Idet0;
+                det.Idet1=imclose(det.IdetExt,strelClose1);
+                det.Idet1=det.Idet1(strelClose1Size+1:end-strelClose1Size,strelClose1Size+1:end-strelClose1Size);
+                det.Idet2=imopen(det.Idet1,strelOpen2);
+                if debug.plot>1
+                    figure(100)
+                    subplot(221)
+                    imshow(det.Idet0)
+                    subplot(222)
+                    imshow(det.Idet1)
+                    subplot(223)
+                    imshow(det.Idet2)
+                    h=subplot(224);
+                end
+                if sum(det.Idet2(:)~=0)
+                    det.Idet3=false(size(det.Idet2));
+                    stats4=regionprops(det.Idet2,'area','eccentricity','PixelIdxList','boundingBox','orientation');
+                    toDelete=[stats4.Eccentricity]>0.9&abs([stats4.Orientation])>45;
+                    stats4(toDelete)=[];
+                    [~,ix]=max([stats4.Area]);
+                    if ~isempty(stats4)
+                        if(stats4(ix).Area>48&&stats4(ix).Eccentricity<0.93&&onBorders(det.Idet3,stats4(ix).BoundingBox)==0)
+                            det.Idet3(stats4(ix).PixelIdxList)=true;
+                            eccentricity=stats4(ix).Eccentricity;
+                            area=stats4(ix).Area;
+                            if debug.plot>1
+                                imshow(det.Idet3);
+                            end
+                        else
+                            if debug.plot>1
+                                cla(h)
+                            end
+                        end
+                    else
+                        if debug.plot>1
+                            cla(h)
+                        end
+                    end
+                else
+                    det.Idet3=false(size(det.Idet2));
+                    if debug.plot>1
+                        cla(h)
+                    end
+                end
+            else
+                det.Idet1=det.Idet0;
+                det.Idet2=det.Idet0;
+                det.Idet3=det.Idet0;
+            end
+            legs(r).I=ICombi;
+            legs(r).ILegR=ILegR;
+            legs(r).ILegB=ILegB;
+            legs(r).IBrightest=IBrightest;
+            legs(r).IMask=IMaskC;
+            legs(r).IMasked=IMaskedC;
+            legs(r).Idet0=det.Idet0;
+            legs(r).Idet1=det.Idet1;
+            legs(r).Idet2=det.Idet2;
+            legs(r).Idet3=det.Idet3;
+            legs(r).eccentricity=eccentricity;
+            legs(r).area=area;
+            r=r+1;
+            clear det
+        end
+        %     IRedMasked=imadjust(IRedC)/2+IBlueC/2;
+        %     IRedMasked(~IMasked)=0;
+        if exist('legs','var') && debug.plot>1
+            subplot(339)
+            imshow(legs(end).I)
+        end
+        drawnow;
+    end
+    if ~isempty(legs)
+        sexCombs(p2).legs=legs;
+        if debug.plot>0
+            subplotSize=ceil(sqrt(length(legs)));
+            figure
+            for p=1:length(legs)
+                subplot(subplotSize,subplotSize,p)
+                IR=legs(p).I;
+                IB=legs(p).I;
+                IG=legs(p).I;
+                IB=IB+uint8(~legs(p).IMask*127);
+                IG=IG+uint8(~legs(p).IMask*127);
+                IG(legs(p).Idet2)=255;
+                IB(legs(p).Idet2)=0;
+                IR(legs(p).Idet2)=0;
+                IG(legs(p).Idet3)=0;
+                IB(legs(p).Idet3)=0;
+                IR(legs(p).Idet3)=255;
+                Icol(:,:,1)=IR;
+                Icol(:,:,2)=IG;
+                Icol(:,:,3)=IB;
+                imshow(Icol)
+                clear Icol
+                %title(sprintf('sex=%c ecc=%.2f area=%.0f',sex{p2},legs(p).eccentricity,legs(p).area))
+            end
+        end
+        Area=[sexCombs(p2).legs.area];
+        sexCombs(p2).weightedArea=sum(Area(isfinite(Area)))/length(Area);
+        if sexCombs(p2).weightedArea>75 && length(Area)>1
+            sexCombs(p2).sex='M';
+        else
+            if length(Area)<3
+                sexCombs(p2).sex='X';
+            else
+                sexCombs(p2).sex='F';
+            end
+        end
+        if standAlone
+            if knownSex{p2}=='X'
+                fprintf('detected sex %c (weighted Area=%.0f)\n',sexCombs(p2).sex,sexCombs(p2).weightedArea);
+            else
+                fprintf('detected sex %c real %c (weighted Area=%.0f)\n',sexCombs(p2).sex,knownSex{p2},sexCombs(p2).weightedArea);
+            end
+        end
+        clear legs
+    end
+end

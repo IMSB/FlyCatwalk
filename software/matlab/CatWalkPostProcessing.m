@@ -1,0 +1,162 @@
+function dataAll=CatWalkPostProcessing(isParallel,debug,dataMainDir,messageBox)
+if nargin==0
+    clear, close all
+    clc
+    set(0,'DefaultFigureWindowStyle','normal')
+    %options
+    global debugImages isDebug
+    isDebug=0;
+    isParallel=0;
+    debugImages=0;
+    %parameters
+    debug.plot=0;
+    debug.onlyBody=0;
+    if debug.plot>0
+        isParallel=0;
+    end
+    [ret, name] = system('hostname');
+    expDir='test';  
+    if strcmp(strtrim(name),'wingX-PC')
+        dataMainDir='C:\Users\wingX\data';
+    else strcmp(strtrim(name),'WX-PC')
+        dataMainDir='E:\Documents\wingx\data';
+    end
+    dataMainDir=fullfile(dataMainDir,expDir);
+else
+    debug.onlyBody=0;
+end
+veinNames={'outline','L1','L2','L3','L4','L5'};
+pixel2mm=3.190460e-03;
+
+if isParallel
+    try
+        if matlabpool('size')==0
+            matlabpool open 4
+        end
+    end
+end
+
+dataMainDirContent=listDirectories(dataMainDir);
+testedIndividuals=1:length(dataMainDirContent);
+[~,alphabeticallySorted]=sort(dataMainDirContent);
+for p=1:length(testedIndividuals)
+    try
+        toSort(p)=str2num(expDirContent{p}(find(expDirContent{p}=='_',1,'last')+1:end));
+    catch
+        toSort(p)=alphabeticallySorted(p);
+    end
+    knownSex{p}='X';
+end
+[~,ix]=sort(toSort);
+ppm = ParforProgressStarter2(sprintf('Analyzing body and IOD... (%s)',dataMainDir), length(testedIndividuals), 0.1);
+tic
+toKeep=false(1,length(testedIndividuals));
+parfor p=1:length(testedIndividuals)
+    dataDir{p}=fullfile(dataMainDir,dataMainDirContent{ix(testedIndividuals(p))});
+    data=struct('WS',{},'brightIx',{},'bright',{},'background',{},'framePos',{},'backgroundC',{},'center',{},...
+        'scale',{},'rot',{},'WSInFly',{},'displacement',{},'centroids',{},'masks',{},'sizes',{},'hinges',{},...
+        'rotHinges',{},'meas',{},'dataDir',{},'veinNames',{},'sex',{},'fit',{},'IOD',{});
+    try
+        fprintf('Analysing %s\n',dataDir{p});
+        data=loadDataFromOpenCVImageProc(dataDir{p},debug);
+        data.meas.pixel2mm=pixel2mm;
+        data.dataDir=dataDir{p};
+        data.veinNames=veinNames;
+        data.sex.known=knownSex{p};
+        %Show the results of OpenCV computation
+        if debug.plot>0
+            figure
+            imshow(label2rgb(data.WS))
+            hold on
+            plot(data.hinges(1,:),data.hinges(2,:),'ro','markersize',10)
+            title('wateshed')
+            figure
+            imshow(data.bright)
+            title('brightest in red channel')
+            figure
+            imshow(data.bright)
+            hold on
+            h=imshow(label2rgb(data.WSInFly));
+            alpha(h,0.2);
+            plot(data.rotHinges(1,:),data.rotHinges(2,:),'ro','markersize',10)
+            title('brightest in red channel')
+        elseif debug.plot==0
+            figure(p)
+            imshow(data.bright)
+        end
+        data=fitBodyParts(data,gcf,debug);
+        %image preparation for wing fit
+        data=fitHead(data,p,debug);
+        toKeep(p)=true;
+    end
+    dataAll(p)=data;
+    ppm.increment();
+end
+delete(ppm);
+for p=1:length(dataAll)
+    dataAll(p).checked=false;
+    if toKeep(p)
+        dataAll(p).useFly=true;
+    else
+        dataAll(p).dataDir=dataDir{p};
+        dataAll(p).useFly=false;
+    end
+end
+
+if debug.onlyBody
+    return;
+end
+
+selectedAfterBody=toKeep;
+dataLength=length(testedIndividuals);
+toKeep=false(1,dataLength);
+ppm = ParforProgressStarter2(sprintf('Analyzing sex and wings... (%s)',dataMainDir), dataLength, 0.1);
+parfor p=1:dataLength
+    sex{p}=struct('abdomen',{},'sexCombs',{},'sex',{});
+    wings{p}=struct('red',{},'blue',{},'BodyAndWingsMaskND',{},'BodyAndWingsMask',{},'blueMask',{},...
+        'BWWing',{});
+    wingMeas{p}=struct('light',{},'fullO',{},'templateData',{},'fitType',{},'upScaleFactor',{},...
+        'manualCorrection',{});
+    fprintf('Analysing %d\n',p);
+    if selectedAfterBody(p)
+        try
+            sex{p}=detectSex(dataAll(p),debug);
+            wings{p}=prepareWingNewLight(dataAll(p),debug);
+            [wingMeas{p},dataAll(p)]=fitWingMirrorStruct3(dataAll(p),wings{p},p,sex{p},debug);
+            toKeep(p)=true;
+        end
+    end
+    ppm.increment();
+end
+delete(ppm);
+
+selectedAfterWings=toKeep;
+ppm = ParforProgressStarter2(sprintf('Saving data... (%s)',dataMainDir), length(testedIndividuals), 0.1);
+for p=1:dataLength
+    if selectedAfterWings(p)
+        dataAll(p).sex=sex{p};
+        dataAll(p).wings=wings{p};
+        dataAll(p).wings.wingMeas=wingMeas{p};
+        if debug.plot>=0
+            plotWingFittingResult(dataAll(p),p);
+            hold on
+            plot(dataAll(p).rotHinges(1,:),dataAll(p).rotHinges(2,:),'go','markersize',10)
+            text(50,50,sprintf('Fly %d, sex %c, IOD=%.3fmm\n',str2num(dataAll(p).dataDir(end-2:end)), dataAll(p).sex.sexCombs.sex, dataAll(p).meas.body.head.IOD.val*pixel2mm),'fontsize',20,'color',[1 1 1]);
+        end
+        fprintf('Fly %d, sex %c, IOD=%.3fmm\n',str2num(dataAll(p).dataDir(end-2:end)), dataAll(p).sex.sexCombs.sex, dataAll(p).meas.body.head.IOD.val);
+        dataAll(p).useFly=true;
+    else
+        dataAll(p).useFly=false;
+    end
+    saveData=dataAll(p);
+    saveData.time=clock;
+    save(fullfile(dataAll(p).dataDir,'FitResults.mat'),'saveData');
+    ppm.increment();
+end
+delete(ppm);
+totalExecTime=toc;
+fprintf('time: %.2f s/fly\n',totalExecTime/length(dataAll))
+
+if isParallel
+    matlabpool close
+end
